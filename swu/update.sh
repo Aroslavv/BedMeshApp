@@ -9,7 +9,7 @@
 # leaves NO permanent changes on the printer.
 # ============================================
 
-function beep() {
+beep() {
     echo 1 > /sys/class/pwm/pwmchip0/pwm0/enable
     usleep $(($1 * 1000))
     echo 0 > /sys/class/pwm/pwmchip0/pwm0/enable
@@ -19,10 +19,11 @@ UPDATE_PATH="/useremain/update_swu"
 TMP_PATH="/tmp/bedmesh"
 LOG_FILE="/tmp/bedmesh/bedmesh.log"
 
-echo "$(date) [swu] Bed Mesh Viewer SWU starting..." > $LOG_FILE
-
-# Create temp directory
+# Create temp directory first
 mkdir -p $TMP_PATH
+
+# Now write to log file
+echo "$(date) [swu] Bed Mesh Viewer SWU starting..." > $LOG_FILE
 
 # Copy binary to /tmp (RAM)
 cp $UPDATE_PATH/bedmesh_viewer $TMP_PATH/bedmesh_viewer

@@ -22,7 +22,7 @@ set "APP_DIR=%~dp0"
 for %%I in ("%APP_DIR%..") do set "PROJECT_DIR=%%~fI"
 set "DIST_DIR=%PROJECT_DIR%\assets"
 
-echo === Bed Mesh Viewer v1.0 Build (Windows) ===
+echo === Bed Mesh Viewer Build (Windows) ===
 echo Mode: %BUILD_MODE%
 echo.
 
@@ -93,7 +93,7 @@ del "%STAGE%\setup.tar" 2>nul
 
 REM Calculate MD5 (using certutil)
 certutil -hashfile "%STAGE%\update_swu\setup.tar.gz" MD5 > "%STAGE%\md5tmp.txt" 2>nul
-for /f "skip=1 tokens=*" %%i in ('%STAGE%\md5tmp.txt') do (
+for /f "usebackq skip=1 tokens=*" %%i in ("%STAGE%\md5tmp.txt") do (
     set "MD5HASH=%%i"
     goto :got_md5
 )

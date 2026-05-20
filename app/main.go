@@ -70,6 +70,8 @@ var displayRotation int = 0
 var (
 	screenW  int = 480
 	screenH  int = 272
+	fbW      int = 480
+	fbH      int = 272
 	fbMem    []byte
 	fbBackup []byte // backup original screen content
 	buttons  []Button
@@ -142,16 +144,22 @@ func initFramebuffer() (*os.File, error) {
 		parts := strings.Split(strings.TrimSpace(string(data)), ",")
 		if len(parts) == 2 {
 			if w, e := strconv.Atoi(parts[0]); e == nil && w > 0 {
+				fbW = w
 				screenW = w
 			}
 			if h, e := strconv.Atoi(parts[1]); e == nil && h > 0 {
+				fbH = h
 				screenH = h
 			}
 		}
 	}
-	log.Printf("Screen: %dx%d", screenW, screenH)
 
-	size := screenW * screenH * 4 // BGRA32
+	if displayRotation == 90 || displayRotation == 270 {
+		screenW, screenH = fbH, fbW
+	}
+	log.Printf("Screen: fb=%dx%d logical=%dx%d", fbW, fbH, screenW, screenH)
+
+	size := fbW * fbH * 4 // BGRA32
 	fbMem, err = syscall.Mmap(int(fb.Fd()), 0, size, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
 	if err != nil {
 		fb.Close()
@@ -191,19 +199,19 @@ func setPixel(x, y int, c color.RGBA) {
 	px, py := x, y
 	switch displayRotation {
 	case 90:
-		px = screenW - 1 - y
+		px = fbW - 1 - y
 		py = x
 	case 180:
-		px = screenW - 1 - x
-		py = screenH - 1 - y
+		px = fbW - 1 - x
+		py = fbH - 1 - y
 	case 270:
 		px = y
-		py = screenH - 1 - x
+		py = fbH - 1 - x
 	}
-	if px < 0 || px >= screenW || py < 0 || py >= screenH {
+	if px < 0 || px >= fbW || py < 0 || py >= fbH {
 		return
 	}
-	off := (py*screenW + px) * 4
+	off := (py*fbW + px) * 4
 	fbMem[off+0] = c.B
 	fbMem[off+1] = c.G
 	fbMem[off+2] = c.R
@@ -371,6 +379,32 @@ func drawText(x, y int, text string, c color.RGBA, scale int) {
 	for i := 0; i < len(text); i++ {
 		drawChar(cx, y, text[i], c, scale)
 		cx += 6 * scale // 5 pixels + 1 gap, scaled
+	}
+}
+
+func drawCharVertical(x, y int, ch byte, c color.RGBA, scale int) {
+	glyph, ok := font5x7[ch]
+	if !ok {
+		return
+	}
+	for row := 0; row < 7; row++ {
+		for col := 0; col < 5; col++ {
+			if glyph[row]&(1<<uint(4-col)) != 0 {
+				for sy := 0; sy < scale; sy++ {
+					for sx := 0; sx < scale; sx++ {
+						setPixel(x+(6-row)*scale+sx, y+col*scale+sy, c)
+					}
+				}
+			}
+		}
+	}
+}
+
+func drawTextVertical(x, y int, text string, c color.RGBA, scale int) {
+	cy := y
+	for i := 0; i < len(text); i++ {
+		drawCharVertical(x, cy, text[i], c, scale)
+		cy += 6 * scale // 5 pixels height + 1 gap
 	}
 }
 
@@ -581,17 +615,34 @@ func drawUI(mesh [][]float64) {
 			drawRect(x, y, cellW-gap, cellH-gap, c)
 
 			// Draw Z value text centered in cell
-			if cellW >= 40 && cellH >= 12 {
-				label := fmt.Sprintf("%.3f", z)
-				maxChars := (cellW - 4) / 6
+			label := fmt.Sprintf("%.3f", z)
+
+			// Decide if we should draw vertically or horizontally
+			// Use vertical if cell is too narrow for horizontal text
+			if cellW < 34 {
+				maxChars := (cellH - 4) / 6
 				if maxChars > 0 && len(label) > maxChars {
 					label = label[:maxChars]
 				}
 				if maxChars >= 4 {
-					textW := len(label) * 6
+					textH := len(label) * 6
+					textW := 7
 					tx := x + (cellW-gap-textW)/2
-					ty := y + (cellH-gap-7)/2
-					drawText(tx, ty, label, white, 1)
+					ty := y + (cellH-gap-textH)/2
+					drawTextVertical(tx, ty, label, white, 1)
+				}
+			} else {
+				if cellH >= 12 {
+					maxChars := (cellW - 4) / 6
+					if maxChars > 0 && len(label) > maxChars {
+						label = label[:maxChars]
+					}
+					if maxChars >= 4 {
+						textW := len(label) * 6
+						tx := x + (cellW-gap-textW)/2
+						ty := y + (cellH-gap-7)/2
+						drawText(tx, ty, label, white, 1)
+					}
 				}
 			}
 		}
@@ -725,21 +776,22 @@ func readInputEvents(path string) {
 func scaleTouch(rawX, rawY int) (int, int) {
 	x, y := rawX, rawY
 	// Kobra touchscreens typically report 0-4095 range
-	if x > screenW {
-		x = (x * screenW) / 4096
+	if x > fbW {
+		x = (x * fbW) / 4096
 	}
-	if y > screenH {
-		y = (y * screenH) / 4096
+	if y > fbH {
+		y = (y * fbH) / 4096
 	}
+
 	// Apply inverse rotation to match drawn coordinates
 	switch displayRotation {
 	case 90:
-		x, y = y, screenW-1-x
+		x, y = y, fbW-1-x
 	case 180:
-		x = screenW - 1 - x
-		y = screenH - 1 - y
+		x = fbW - 1 - x
+		y = fbH - 1 - y
 	case 270:
-		x, y = screenH-1-y, x
+		x, y = fbH-1-y, x
 	}
 	return x, y
 }
@@ -748,7 +800,7 @@ func scaleTouch(rawX, rawY int) (int, int) {
 
 func main() {
 	setupLogging()
-	log.Println("=== Bed Mesh Visualizer v1.0 starting ===")
+	log.Println("=== Bed Mesh Visualizer v1.1 starting ===")
 	detectRotation()
 
 	// Signal handling for graceful shutdown
@@ -778,8 +830,8 @@ func main() {
 	}()
 
 	// Setup buttons (larger for touchscreen)
-	btnW := 110
-	btnH := 32
+	btnW := 140
+	btnH := 45
 	buttons = []Button{
 		{
 			X: screenW - btnW - 8, Y: 0, W: btnW, H: btnH,
