@@ -8,8 +8,8 @@ Visualization of the Bed Mesh on the printer's screen. Reads data from `printer_
 
 | Printer Model | Tested     |
 |---------------|------------|
-| Kobra 3 V2    | ❓         |
-| Kobra 3 Max   | ❓         |
+| Kobra 3 V2    | ✅         |
+| Kobra 3 Max   | ✅ 2.5.0.8 |
 | Kobra S1      | ✅ 2.7.0.9 |
 | Kobra S1 Max  | ❓         |
 
@@ -22,7 +22,7 @@ If you prefer not to compile the project yourself, you can download the ready-to
 ### SWU - one-time execution from a USB drive
 
 1. Download the appropriate `.swu` package for your printer from the [Releases](https://github.com/Aroslavv/BedMeshApp/releases/latest) page (or build it yourself)
-2. Copy the downloaded `.swu` file to the `aGVscF9zb3Nf` folder on the USB drive and rename it to `update.swu`
+2. Copy the downloaded `.swu` file to the `aGVscF9zb3Nf` folder on the USB drive ( formatted as FAT32 ) and rename it to `update.swu`
 3. Insert the USB drive into the printer
 4. The firmware will automatically recognize the file and launch the viewer
 5. After clicking `Exit` (or after 5 minutes), the viewer will close
