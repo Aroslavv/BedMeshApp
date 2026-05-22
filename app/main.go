@@ -523,7 +523,33 @@ func getColorForZ(z, minZ, maxZ float64) color.RGBA {
 	if maxZ-minZ < 0.0001 {
 		return color.RGBA{R: 0, G: 200, B: 0, A: 255} // flat = green
 	}
-	norm := (z - minZ) / (maxZ - minZ) // 0.0 .. 1.0
+
+	// Calculate absolute maximum deviation from zero
+	absMin := minZ
+	if absMin < 0 {
+		absMin = -absMin
+	}
+	absMax := maxZ
+	if absMax < 0 {
+		absMax = -absMax
+	}
+	limit := absMin
+	if absMax > limit {
+		limit = absMax
+	}
+
+	if limit < 0.0001 {
+		return color.RGBA{R: 0, G: 200, B: 0, A: 255}
+	}
+
+	// Map z in range [-limit, limit] to [0.0, 1.0]
+	norm := (z + limit) / (2 * limit)
+	if norm < 0.0 {
+		norm = 0.0
+	}
+	if norm > 1.0 {
+		norm = 1.0
+	}
 
 	// Blue (low) -> Green (mid) -> Red (high)
 	var r, g, b uint8
