@@ -18,7 +18,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_MODE="${1:-binary}"
 
-echo "=== Bed Mesh Viewer v1.0 Build (Linux) ==="
+echo "=== Bed Mesh Viewer Build (Linux) ==="
 echo "Mode: $BUILD_MODE"
 echo ""
 

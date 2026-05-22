@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -48,6 +49,15 @@ type InputEvent struct {
 	Value int32
 }
 
+type inputAbsInfo struct {
+	Value      int32
+	Minimum    int32
+	Maximum    int32
+	Fuzz       int32
+	Flat       int32
+	Resolution int32
+}
+
 type Button struct {
 	X, Y, W, H  int
 	Label       string
@@ -64,29 +74,49 @@ type PrinterConfig struct {
 
 // --- Globals ---
 
+//go:embed VERSION
+var versionFS string
+
+func getVersion() string {
+	return strings.TrimSpace(versionFS)
+}
+
 // Display rotation: 0 = none, 180 = vflip+hflip (KS1/KS1M)
 var displayRotation int = 0
 
 var (
-	screenW  int = 480
-	screenH  int = 272
-	fbMem    []byte
-	fbBackup []byte // backup original screen content
-	buttons  []Button
-	exitFlag int32 // atomic flag
-	mu       sync.Mutex
+	screenW        int  = 480
+	screenH        int  = 272
+	fbW            int  = 480
+	fbH            int  = 272
+	fbMem          []byte
+	fbBackup       []byte // backup original screen content
+	buttons        []Button
+	exitFlag       int32 // atomic flag
+	mu             sync.Mutex
+	touchMaxX      int  = 4095
+	touchMaxY      int  = 4095
+	touchIsLogical bool = false
+	hasTouchLimits bool = false
+	modelCode      string = ""
+	touchCalX0     int  = 25
+	touchCalY0     int  = 235
+	touchCalX1     int  = 460
+	touchCalY1     int  = 25
 )
 
-func detectRotation() {
-	// Manual override via environment variable
-	if v := os.Getenv("BEDMESH_ROTATE"); v != "" {
-		if r, err := strconv.Atoi(v); err == nil {
-			displayRotation = r
-			log.Printf("Display rotation override: %d°", displayRotation)
-			return
-		}
+func getAbsInfo(fd uintptr, axis int) (inputAbsInfo, error) {
+	var info inputAbsInfo
+	// 0x80184540 corresponds to EVIOCGABS(0)
+	ioctlCode := uintptr(0x80184540) + uintptr(axis)
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, ioctlCode, uintptr(unsafe.Pointer(&info)))
+	if errno != 0 {
+		return info, errno
 	}
+	return info, nil
+}
 
+func detectRotation() {
 	// Try to detect model from environment or system files
 	model := os.Getenv("KOBRA_MODEL_CODE")
 	if model == "" {
@@ -103,24 +133,33 @@ func detectRotation() {
 		}
 	}
 
-	// Try to detect from screen resolution (fallback)
-	// KS1/KS1M: 480x272 with 180° rotation
-	// K3/K3V2:  480x272 with 90° rotation (portrait framebuffer)
-	// K3M:      480x272 with 270° rotation
-
 	switch model {
 	case "KS1", "KS1M":
 		displayRotation = 180
+		touchCalX0, touchCalY0, touchCalX1, touchCalY1 = 0, 0, 800, 480
 	case "K3M":
 		displayRotation = 270
-	case "K3V2":
+		touchCalX0, touchCalY0, touchCalX1, touchCalY1 = 25, 235, 460, 25
+	case "K3", "K3V2":
 		displayRotation = 90
+		touchCalX0, touchCalY0, touchCalX1, touchCalY1 = 25, 235, 460, 25
 	default:
 		// Unknown model - try 180° as safest default for landscape screens
 		displayRotation = 180
+		touchCalX0, touchCalY0, touchCalX1, touchCalY1 = 25, 235, 460, 25
 		log.Printf("WARN: Unknown model '%s', defaulting to 180° rotation", model)
 	}
-	log.Printf("Display rotation: %d° (model=%s)", displayRotation, model)
+	modelCode = model
+
+	// Manual override via environment variable for displayRotation
+	if v := os.Getenv("BEDMESH_ROTATE"); v != "" {
+		if r, err := strconv.Atoi(v); err == nil {
+			displayRotation = r
+			log.Printf("Display rotation override: %d°", displayRotation)
+		}
+	}
+
+	log.Printf("Display rotation: %d° (model=%s)", displayRotation, modelCode)
 }
 
 // --- Logging ---
@@ -142,16 +181,22 @@ func initFramebuffer() (*os.File, error) {
 		parts := strings.Split(strings.TrimSpace(string(data)), ",")
 		if len(parts) == 2 {
 			if w, e := strconv.Atoi(parts[0]); e == nil && w > 0 {
+				fbW = w
 				screenW = w
 			}
 			if h, e := strconv.Atoi(parts[1]); e == nil && h > 0 {
+				fbH = h
 				screenH = h
 			}
 		}
 	}
-	log.Printf("Screen: %dx%d", screenW, screenH)
 
-	size := screenW * screenH * 4 // BGRA32
+	if displayRotation == 90 || displayRotation == 270 {
+		screenW, screenH = fbH, fbW
+	}
+	log.Printf("Screen: fb=%dx%d logical=%dx%d", fbW, fbH, screenW, screenH)
+
+	size := fbW * fbH * 4 // BGRA32
 	fbMem, err = syscall.Mmap(int(fb.Fd()), 0, size, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
 	if err != nil {
 		fb.Close()
@@ -191,19 +236,19 @@ func setPixel(x, y int, c color.RGBA) {
 	px, py := x, y
 	switch displayRotation {
 	case 90:
-		px = screenW - 1 - y
+		px = fbW - 1 - y
 		py = x
 	case 180:
-		px = screenW - 1 - x
-		py = screenH - 1 - y
+		px = fbW - 1 - x
+		py = fbH - 1 - y
 	case 270:
 		px = y
-		py = screenH - 1 - x
+		py = fbH - 1 - x
 	}
-	if px < 0 || px >= screenW || py < 0 || py >= screenH {
+	if px < 0 || px >= fbW || py < 0 || py >= fbH {
 		return
 	}
-	off := (py*screenW + px) * 4
+	off := (py*fbW + px) * 4
 	fbMem[off+0] = c.B
 	fbMem[off+1] = c.G
 	fbMem[off+2] = c.R
@@ -374,6 +419,32 @@ func drawText(x, y int, text string, c color.RGBA, scale int) {
 	}
 }
 
+func drawCharVertical(x, y int, ch byte, c color.RGBA, scale int) {
+	glyph, ok := font5x7[ch]
+	if !ok {
+		return
+	}
+	for row := 0; row < 7; row++ {
+		for col := 0; col < 5; col++ {
+			if glyph[row]&(1<<uint(4-col)) != 0 {
+				for sy := 0; sy < scale; sy++ {
+					for sx := 0; sx < scale; sx++ {
+						setPixel(x+(6-row)*scale+sx, y+col*scale+sy, c)
+					}
+				}
+			}
+		}
+	}
+}
+
+func drawTextVertical(x, y int, text string, c color.RGBA, scale int) {
+	cy := y
+	for i := 0; i < len(text); i++ {
+		drawCharVertical(x, cy, text[i], c, scale)
+		cy += 6 * scale // 5 pixels height + 1 gap
+	}
+}
+
 // --- Mesh Parsing (JSON format) ---
 
 func parseMesh(path string) ([][]float64, int, int) {
@@ -480,7 +551,11 @@ func drawUI(mesh [][]float64) {
 	drawRect(0, 0, screenW, screenH, bgColor)
 
 	// Title
-	drawText(screenW/2-60, 5, "Bed Mesh", white, 2)
+	if screenW < 300 {
+		drawText(8, 12, "Bed Mesh", white, 2)
+	} else {
+		drawText(screenW/2-60, 5, "Bed Mesh", white, 2)
+	}
 
 	// Draw buttons (rounded corners, dark bg, subtle border)
 	for _, b := range buttons {
@@ -528,12 +603,24 @@ func drawUI(mesh [][]float64) {
 	avgZ := sumZ / float64(count)
 	deltaZ := maxZ - minZ
 
-	// Layout: title bar (30px) + info bar + mesh + bottom stats
+	// Layout: title bar + info bar + mesh + bottom stats
 	infoBarY := 30
 	infoBarH := 22
 	margin := 15
+	fs := 2 // font scale for info/stats
+
+	if screenW < 300 {
+		infoBarY = 50 // Push down to clear the 45px tall Exit button
+		infoBarH = 14
+		margin = 10
+		fs = 1
+	}
+
 	topY := infoBarY + infoBarH + 4
 	bottomBarH := 26
+	if screenW < 300 {
+		bottomBarH = 20
+	}
 	availW := screenW - margin*2
 	availH := screenH - topY - bottomBarH - 4
 
@@ -558,17 +645,20 @@ func drawUI(mesh [][]float64) {
 	cyan := color.RGBA{80, 220, 255, 255}
 	lightGray := color.RGBA{180, 180, 180, 255}
 
-	fs := 2      // font scale for info/stats
 	cw := 6 * fs // character width at this scale
 
 	gridStr := fmt.Sprintf("%dx%d", cols, rows)
 	drawText(margin, infoBarY, gridStr, cyan, fs)
 
 	minStr := fmt.Sprintf("Min:%.3f", minZ)
-	drawText(margin+len(gridStr)*cw+12, infoBarY, minStr, color.RGBA{80, 80, 255, 255}, fs)
+	gapBetweenInfo := 12
+	if screenW < 300 {
+		gapBetweenInfo = 8
+	}
+	drawText(margin+len(gridStr)*cw+gapBetweenInfo, infoBarY, minStr, color.RGBA{80, 80, 255, 255}, fs)
 
 	maxStr := fmt.Sprintf("Max:%.3f", maxZ)
-	drawText(margin+len(gridStr)*cw+12+len(minStr)*cw+12, infoBarY, maxStr, color.RGBA{255, 80, 80, 255}, fs)
+	drawText(margin+len(gridStr)*cw+gapBetweenInfo+len(minStr)*cw+gapBetweenInfo, infoBarY, maxStr, color.RGBA{255, 80, 80, 255}, fs)
 
 	// --- MESH GRID ---
 	// Draw with Y flipped: row 0 (Y_min = front of bed) at BOTTOM,
@@ -581,17 +671,34 @@ func drawUI(mesh [][]float64) {
 			drawRect(x, y, cellW-gap, cellH-gap, c)
 
 			// Draw Z value text centered in cell
-			if cellW >= 40 && cellH >= 12 {
-				label := fmt.Sprintf("%.3f", z)
-				maxChars := (cellW - 4) / 6
+			label := fmt.Sprintf("%.3f", z)
+
+			// Decide if we should draw vertically or horizontally
+			// Use vertical if cell is too narrow for horizontal text
+			if cellW < 42 {
+				maxChars := (cellH - 4) / 6
 				if maxChars > 0 && len(label) > maxChars {
 					label = label[:maxChars]
 				}
 				if maxChars >= 4 {
-					textW := len(label) * 6
+					textH := len(label) * 6
+					textW := 7
 					tx := x + (cellW-gap-textW)/2
-					ty := y + (cellH-gap-7)/2
-					drawText(tx, ty, label, white, 1)
+					ty := y + (cellH-gap-textH)/2
+					drawTextVertical(tx, ty, label, white, 1)
+				}
+			} else {
+				if cellH >= 12 {
+					maxChars := (cellW - 4) / 6
+					if maxChars > 0 && len(label) > maxChars {
+						label = label[:maxChars]
+					}
+					if maxChars >= 4 {
+						textW := len(label) * 6
+						tx := x + (cellW-gap-textW)/2
+						ty := y + (cellH-gap-7)/2
+						drawText(tx, ty, label, white, 1)
+					}
 				}
 			}
 		}
@@ -606,13 +713,24 @@ func drawUI(mesh [][]float64) {
 
 	// Average
 	avgStr := fmt.Sprintf("Avg:%.3f", avgZ)
-	drawText(margin+len(deltaStr)*cw+12, bottomY, avgStr, lightGray, fs)
+	gapBetweenBottom := 12
+	if screenW < 300 {
+		gapBetweenBottom = 8
+	}
+	drawText(margin+len(deltaStr)*cw+gapBetweenBottom, bottomY, avgStr, lightGray, fs)
 
 	// Color legend gradient bar
-	legendX := screenW - margin - 120
 	legendW := 100
+	if screenW < 300 {
+		legendW = 70
+	}
+	legendX := screenW - margin - legendW
 	legendH := 12
 	legendY := bottomY + 3
+	if screenW < 300 {
+		legendY = bottomY + 1
+		legendH = 8
+	}
 	for i := 0; i < legendW; i++ {
 		norm := float64(i) / float64(legendW-1)
 		fakeZ := minZ + norm*deltaZ
@@ -620,8 +738,14 @@ func drawUI(mesh [][]float64) {
 		drawRect(legendX+i, legendY, 1, legendH, c)
 	}
 	// Legend labels
-	drawText(legendX-30, legendY-1, "low", color.RGBA{80, 80, 255, 255}, 1)
-	drawText(legendX+legendW+4, legendY-1, "hi", color.RGBA{255, 80, 80, 255}, 1)
+	lowTextX := legendX - 30
+	hiTextX := legendX + legendW + 4
+	if screenW < 300 {
+		lowTextX = legendX - 22
+		hiTextX = legendX + legendW + 3
+	}
+	drawText(lowTextX, legendY-1, "low", color.RGBA{80, 80, 255, 255}, 1)
+	drawText(hiTextX, legendY-1, "hi", color.RGBA{255, 80, 80, 255}, 1)
 
 	log.Printf("UI drawn: %dx%d mesh, Z range [%.4f, %.4f], delta=%.4f, avg=%.4f",
 		rows, cols, minZ, maxZ, deltaZ, avgZ)
@@ -685,6 +809,26 @@ func readInputEvents(path string) {
 	// Grab the device exclusively so K3SysUi doesn't get events
 	grabInput(f)
 
+	// Try to query touch limits
+	if infoX, err := getAbsInfo(f.Fd(), ABS_X); err == nil && infoX.Maximum > 0 {
+		if infoY, err := getAbsInfo(f.Fd(), ABS_Y); err == nil && infoY.Maximum > 0 {
+			mu.Lock()
+			touchMaxX = int(infoX.Maximum)
+			touchMaxY = int(infoY.Maximum)
+			hasTouchLimits = true
+			
+			// Detect if coordinates already map to the screen's logical portrait orientation
+			if (touchMaxX == screenW-1 && touchMaxY == screenH-1) || (touchMaxX == screenW && touchMaxY == screenH) {
+				touchIsLogical = true
+				log.Printf("Touch device %s is ALREADY in logical orientation: %dx%d", path, touchMaxX, touchMaxY)
+			} else {
+				touchIsLogical = false
+				log.Printf("Touch device %s raw limits: X[0..%d], Y[0..%d]", path, touchMaxX, touchMaxY)
+			}
+			mu.Unlock()
+		}
+	}
+
 	var event InputEvent
 	var lastX, lastY int
 
@@ -723,23 +867,53 @@ func readInputEvents(path string) {
 }
 
 func scaleTouch(rawX, rawY int) (int, int) {
-	x, y := rawX, rawY
-	// Kobra touchscreens typically report 0-4095 range
-	if x > screenW {
-		x = (x * screenW) / 4096
+	mu.Lock()
+	isLogical := touchIsLogical
+	limitX, limitY := touchMaxX, touchMaxY
+	calX0, calY0, calX1, calY1 := touchCalX0, touchCalY0, touchCalX1, touchCalY1
+	mu.Unlock()
+
+	// If the touch driver reports logical coordinates already
+	if isLogical {
+		x := (rawX * screenW) / (limitX + 1)
+		y := (rawY * screenH) / (limitY + 1)
+		return x, y
 	}
-	if y > screenH {
-		y = (y * screenH) / 4096
+
+	// Apply touch calibration to get physical landscape coordinates
+	var x, y int
+	if calX1 != calX0 {
+		x = ((rawX - calX0) * fbW) / (calX1 - calX0)
+	} else {
+		x = rawX
 	}
-	// Apply inverse rotation to match drawn coordinates
+	if calY1 != calY0 {
+		y = ((rawY - calY0) * fbH) / (calY1 - calY0)
+	} else {
+		y = rawY
+	}
+
+	// Constrain to physical screen bounds
+	if x < 0 {
+		x = 0
+	} else if x >= fbW {
+		x = fbW - 1
+	}
+	if y < 0 {
+		y = 0
+	} else if y >= fbH {
+		y = fbH - 1
+	}
+
+	// Apply display rotation to physical landscape coordinates
 	switch displayRotation {
 	case 90:
-		x, y = y, screenW-1-x
+		x, y = y, fbW-1-x
 	case 180:
-		x = screenW - 1 - x
-		y = screenH - 1 - y
+		x = fbW - 1 - x
+		y = fbH - 1 - y
 	case 270:
-		x, y = screenH-1-y, x
+		x, y = fbH-1-y, x
 	}
 	return x, y
 }
@@ -748,7 +922,7 @@ func scaleTouch(rawX, rawY int) (int, int) {
 
 func main() {
 	setupLogging()
-	log.Println("=== Bed Mesh Visualizer v1.0 starting ===")
+	log.Printf("=== Bed Mesh Visualizer v%s starting ===", getVersion())
 	detectRotation()
 
 	// Signal handling for graceful shutdown
@@ -778,8 +952,8 @@ func main() {
 	}()
 
 	// Setup buttons (larger for touchscreen)
-	btnW := 110
-	btnH := 32
+	btnW := 140
+	btnH := 45
 	buttons = []Button{
 		{
 			X: screenW - btnW - 8, Y: 0, W: btnW, H: btnH,

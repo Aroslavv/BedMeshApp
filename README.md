@@ -8,10 +8,28 @@ Visualization of the Bed Mesh on the printer's screen. Reads data from `printer_
 
 | Printer Model | Tested     |
 |---------------|------------|
-| Kobra 3 V2    | ❓         |
-| Kobra 3 Max   | ❓         |
+| Kobra 3 V2    | ✅         |
+| Kobra 3 Max   | ✅ 2.5.0.8 |
 | Kobra S1      | ✅ 2.7.0.9 |
 | Kobra S1 Max  | ❓         |
+
+## Grid Orientation
+
+The visualization on the screen **always corresponds directly to the physical X/Y coordinate system of the bed** (top-down view):
+- **Top** of the screen = **Back** of the bed (Y-max)
+- **Bottom** of the screen = **Front** of the bed (Y-min)
+- **Left** side = **Left** of the bed (X-min)
+- **Right** side = **Right** of the bed (X-max)
+
+> [!NOTE]
+> On vertical/portrait displays (e.g., Kobra 3 V2), the Z-value text inside the grid cells is rendered vertically (rotated 90°) to fit inside the narrow columns. **The grid itself is NOT rotated or tilted**—its physical orientation remains aligned with the Cartesian XY coordinates of the bed.
+
+### Understanding Z-Values & How to Level
+
+The heatmap uses colors to represent height offsets relative to the ideal center Z-height:
+- **Positive Z-value (Red / Warm colors)**: The bed is **too high** (closer to the nozzle) at this point.
+- **Negative Z-value (Blue / Cool colors)**: The bed is **too low** (further from the nozzle) at this point.
+- **Near-zero Z-value (Green / Neutral)**: The bed is **level** and perfect.
 
 ## Download
 
@@ -22,7 +40,7 @@ If you prefer not to compile the project yourself, you can download the ready-to
 ### SWU - one-time execution from a USB drive
 
 1. Download the appropriate `.swu` package for your printer from the [Releases](https://github.com/Aroslavv/BedMeshApp/releases/latest) page (or build it yourself)
-2. Copy the downloaded `.swu` file to the `aGVscF9zb3Nf` folder on the USB drive and rename it to `update.swu`
+2. Copy the downloaded `.swu` file to the `aGVscF9zb3Nf` folder on the USB drive ( formatted as FAT32 ) and rename it to `update.swu`
 3. Insert the USB drive into the printer
 4. The firmware will automatically recognize the file and launch the viewer
 5. After clicking `Exit` (or after 5 minutes), the viewer will close
